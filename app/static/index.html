@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>SIAS Hub Industrial Dashboard</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <div class="shell">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">SIAS Hub</p>
+          <h1>Industrial Machine Simulator</h1>
+        </div>
+        <button id="refresh-btn">Refresh telemetry</button>
+      </header>
+
+      <section class="toolbar">
+        <label>
+          Machine
+          <select id="machine-select"></select>
+        </label>
+        <label>
+          Fault scenario
+          <select id="scenario-select"></select>
+        </label>
+        <label>
+          Duration (minutes)
+          <input id="duration-input" type="number" min="1" max="180" value="10" />
+        </label>
+      </section>
+
+      <section id="summary-cards" class="card-grid"></section>
+
+      <section class="panel-grid">
+        <div class="panel">
+          <h2>Latest conditions</h2>
+          <div id="latest-values" class="metric-list"></div>
+        </div>
+
+        <div class="panel">
+          <h2>System status</h2>
+          <div id="status-box" class="status-box"></div>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2>Recent telemetry</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Timestamp</th>
+                <th>Temp (°C)</th>
+                <th>Pressure</th>
+                <th>Vibration</th>
+                <th>Power</th>
+                <th>Flow</th>
+                <th>Health</th>
+              </tr>
+            </thead>
+            <tbody id="telemetry-table-body"></tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+
+    <script src="/static/app.js"></script>
+  </body>
+</html>
