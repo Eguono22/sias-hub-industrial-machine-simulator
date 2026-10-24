@@ -1,0 +1,82 @@
+# SIAS Hub Industrial Machine Simulator
+
+Industrial machine simulator for SIAS Hub, generating synthetic sensor data and fault scenarios for extruders, coating systems, predictive maintenance, and digital twins.
+
+## Overview
+
+This project provides a lightweight FastAPI-based simulator for industrial automation environments.
+It exposes synthetic telemetry for common machine classes such as extruders, coating lines, dryers, and compressors. Each machine can be simulated under different fault conditions such as bearing wear, thermal stress, pressure spikes, coating drift, coolant loss, and electrical instability.
+
+## Features
+
+- Synthetic industrial telemetry generation
+- Fault scenario simulation for digital twin testing
+- Predictive maintenance readiness with health scoring
+- REST API endpoints for monitoring and analysis
+- Compatible with SIAS Hub environments and smart manufacturing workflows
+
+## Project structure
+
+- `app/main.py` – API entry point and routes
+- `app/simulator.py` – machine catalog, telemetry generation, and fault models
+- `requirements.txt` – Python dependencies
+
+## Quick start
+
+1. Create a virtual environment
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+```
+
+2. Install dependencies
+
+```bash
+pip install -r requirements.txt
+```
+
+3. Run the application
+
+```bash
+uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+```
+
+4. Open the API documentation
+
+- Swagger UI: http://localhost:8000/docs
+- ReDoc: http://localhost:8000/redoc
+
+## Example endpoints
+
+```bash
+curl http://localhost:8000/machines
+curl http://localhost:8000/machines/extruder-01/snapshot
+curl "http://localhost:8000/machines/extruder-01/telemetry?duration_minutes=10&scenario=bearing_wear&sample_rate_hz=1"
+```
+
+## Included machine models
+
+- Extruder 01
+- Coating Line 01
+- Dryer 01
+- Compressor 01
+
+## Supported fault scenarios
+
+- `normal`
+- `bearing_wear`
+- `heat_excess`
+- `pressure_spike`
+- `coating_drift`
+- `coolant_loss`
+- `drive_misalignment`
+- `electrical_fault`
+
+## Notes
+
+This simulator is intentionally lightweight and deterministic enough to be used for demos, dashboard prototyping, digital twin experiments, and predictive maintenance proofs of concept.
+
+## License
+
+MIT
