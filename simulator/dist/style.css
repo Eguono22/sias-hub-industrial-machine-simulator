@@ -192,3 +192,22 @@ dialog::backdrop { background: rgb(20 37 44 / 38%); }
   .header-right { gap: 8px; }
   .machine-grid { grid-template-columns: 1fr; }
 }
+
+.status-strip.paused > span:first-child,
+.status-strip.paused .live { color: var(--amber); }
+.status-strip.paused > span:first-child i,
+.status-strip.paused .live i { background: #d49b36; }
+.actions { flex-wrap: wrap; }
+@media (max-width: 760px) {
+  .actions button { white-space: nowrap; }
+  #save-status { flex-basis: 100%; }
+}
+
+#activity-dialog { width: min(620px, calc(100% - 30px)); max-height: calc(100dvh - 40px); }
+.activity-content { padding: 20px; }
+#activity-count, .activity-empty { color: var(--muted); font-size: 11px; line-height: 1.5; }
+.activity-filter { display: flex; align-items: center; gap: 10px; margin: 14px 0; color: #54656d; font-size: 11px; }
+.activity-filter select { padding: 7px 9px; border: 1px solid var(--line); border-radius: 5px; background: #fff; color: var(--ink); font: inherit; }
+#activity-list .event { padding: 13px 0; }
+#activity-list .event-copy { overflow-wrap: anywhere; font-size: 12px; }
+#activity-list .event-copy small { font-size: 10px; }

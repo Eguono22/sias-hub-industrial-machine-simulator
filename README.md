@@ -49,6 +49,16 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 - Dashboard: http://localhost:8000/
 - API docs: http://localhost:8000/docs
 
+## Standalone dashboard
+
+The browser-only dashboard lives in `simulator/dist/`. Serve that directory with a static HTTP server, for example `python3 -m http.server 8080 --directory simulator/dist`, then open http://localhost:8080/.
+
+- Pause freezes readings, elapsed simulation time, and counters; Resume continues from that point.
+- The latest session is saved in browser local storage, including scenario, target machine, speed, chart selection, view, counters, and the last 60 simulated seconds of readings.
+- Reloading restores the session without advancing time while the page was closed. A paused session stays paused. Starting a new simulation resets the readings and counters.
+- Activity history records scenario starts, pauses, resumes, exports, and session restores with timestamps and session numbers. Open **View all activity** to browse the latest 100 events or filter warnings; events persist across reloads.
+- Saved sessions stay on the current browser and origin. If browser storage is unavailable, the dashboard continues running and shows that saving is unavailable.
+
 ## Example API calls
 
 ```bash

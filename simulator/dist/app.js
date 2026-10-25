@@ -19,26 +19,86 @@
     pressure: { label: "Line pressure", unit: "bar", min: 5, max: 11, axis: [11, 9, 7, 5] },
     vibration: { label: "Vibration", unit: "mm/s", min: 0, max: 8, axis: [8, 6, 4, 2] },
   };
-  const samples = Array.from({ length: 31 }, (_, index) => index);
-  const events = [
-    { icon: "✓", text: "<b>Simulation engine</b> connected and generating data", time: "Just now" },
-    { icon: "↗", text: "<b>EX-002</b> operating within normal parameters", time: "2 min ago" },
-    { icon: "!", warning: true, text: "<b>EX-001</b> temperature variance detected", time: "4 min ago" },
-    { icon: "◇", text: "<b>Digital twin</b> synchronized with machine fleet", time: "8 min ago" },
-  ];
+  const history = [];
+  const events = [];
   const state = {
     activeView: "overview",
     machineIndex: 0,
     metric: "temperature",
     scenario: "normal",
+    targetIndex: 0,
+    speed: 1,
+    paused: false,
     elapsed: 0,
-    points: 124862,
+    points: 0,
     session: 842,
-    startedAt: Date.now(),
+    lastTick: Date.now(),
   };
   const $ = (selector) => document.querySelector(selector);
   const $$ = (selector) => [...document.querySelectorAll(selector)];
   let toastTimer;
+
+  const storageKey = "sias-simulator-session-v1";
+
+  function saveSession() {
+    try {
+      const { lastTick, ...savedState } = state;
+      localStorage.setItem(storageKey, JSON.stringify({ version: 1, state: savedState, history, events }));
+      $("#save-status").textContent = "Saved on this device";
+    } catch {
+      $("#save-status").textContent = "Session saving unavailable";
+    }
+  }
+
+  function restoreSession() {
+    try {
+      const saved = JSON.parse(localStorage.getItem(storageKey));
+      if (!saved || saved.version !== 1) return false;
+      const value = saved.state;
+      const validIndex = (index) => Number.isInteger(index) && index >= 0 && index < machines.length;
+      const validCount = (count) => Number.isSafeInteger(count) && count >= 0;
+      if (!value || !validIndex(value.machineIndex) || !validIndex(value.targetIndex)
+        || !Object.hasOwn(scenarios, value.scenario) || !Object.hasOwn(metricConfig, value.metric)
+        || ![1, 5, 10].includes(value.speed) || typeof value.paused !== "boolean"
+        || !validCount(value.elapsed) || !validCount(value.points) || !validCount(value.session)
+        || !["overview", "machines", "scenarios", "twins", "maintenance", "data"].includes(value.activeView)
+        || !Array.isArray(saved.history) || !saved.history.length || saved.history.length > 61) return false;
+      let previous = -1;
+      for (const sample of saved.history) {
+        if (!sample || !validCount(sample.elapsed) || sample.elapsed <= previous
+          || sample.elapsed > value.elapsed || sample.elapsed < value.elapsed - 60
+          || typeof sample.timestamp !== "string" || !Number.isFinite(Date.parse(sample.timestamp))
+          || !Array.isArray(sample.readings) || sample.readings.length !== machines.length
+          || !sample.readings.every((readings) => readings && Object.keys(metricConfig).every((metric) => Number.isFinite(readings[metric])))) return false;
+        previous = sample.elapsed;
+      }
+      if (previous !== value.elapsed || value.points !== (value.elapsed + 1) * 12) return false;
+      for (const key of Object.keys(state)) {
+        if (key !== "lastTick") state[key] = value[key];
+      }
+      history.push(...saved.history);
+      if (Array.isArray(saved.events)) {
+        events.push(...saved.events.filter((event) => event && typeof event.text === "string"
+          && event.text.length <= 500 && typeof event.timestamp === "string"
+          && Number.isFinite(Date.parse(event.timestamp)) && validCount(event.session)
+          && typeof event.warning === "boolean").slice(0, 100).map((event) => ({
+            text: event.text, timestamp: event.timestamp, session: event.session, warning: event.warning,
+          })));
+      }
+      state.lastTick = Date.now();
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  function renderRunState() {
+    $("#pause-sim").textContent = state.paused ? "▶ Resume" : "Ⅱ Pause";
+    $("#pause-sim").setAttribute("aria-pressed", String(state.paused));
+    $("#run-status").textContent = state.paused ? "Simulation paused" : `Simulation running · ${state.speed}×`;
+    $("#stream-status").textContent = state.paused ? "PAUSED" : "LIVE DATA";
+    $(".status-strip").classList.toggle("paused", state.paused);
+  }
 
   function showToast(message) {
     const toast = $("#toast");
@@ -50,17 +110,17 @@
 
   function machineValue(machine, metric) {
     const base = machine[metric];
-    const phase = Date.now() / 1500 + machine.id.charCodeAt(1);
+    const phase = state.elapsed / 1.5 + machines.indexOf(machine);
     const noise = Math.sin(phase) * (metric === "vibration" ? 0.18 : 0.8);
-    if (state.scenario === "overheat" && machine === machines[state.machineIndex] && metric === "temperature") return base + 18 + noise;
-    if (state.scenario === "bearing" && machine === machines[state.machineIndex] && metric === "vibration") return base + 3.5 + Math.abs(noise);
-    if (state.scenario === "pressure" && machine === machines[state.machineIndex] && metric === "pressure") return base + Math.sin(phase * 2) * 1.7;
-    if (state.scenario === "coating" && machine === machines[state.machineIndex] && metric === "temperature") return base + Math.sin(phase * 1.7) * 5;
+    if (state.scenario === "overheat" && machine === machines[state.targetIndex] && metric === "temperature") return base + 18 + noise;
+    if (state.scenario === "bearing" && machine === machines[state.targetIndex] && metric === "vibration") return base + 3.5 + Math.abs(noise);
+    if (state.scenario === "pressure" && machine === machines[state.targetIndex] && metric === "pressure") return base + Math.sin(phase * 2) * 1.7;
+    if (state.scenario === "coating" && machine === machines[state.targetIndex] && metric === "temperature") return base + Math.sin(phase * 1.7) * 5;
     return base + noise;
   }
 
   function hasFault(machineIndex) {
-    return machineIndex === state.machineIndex && state.scenario !== "normal";
+    return machineIndex === state.targetIndex && state.scenario !== "normal";
   }
 
   function renderMachines() {
@@ -75,42 +135,70 @@
         </div>
       </article>`;
     }).join("");
+    $("#fault-summary").textContent = state.scenario === "normal" ? "Across 0 machines" : "Across 1 machine";
+    $("#health").innerHTML = `${state.scenario === "normal" ? "100" : "87.5"} <em>%</em>`;
+    $("#points").textContent = state.points.toLocaleString();
     const activeCount = machines.length;
     $("#active-count").innerHTML = `${activeCount} <em>/ ${machines.length}</em>`;
     $("#fault-count").innerHTML = `${state.scenario === "normal" ? 0 : 1} <em class="warning">${state.scenario === "normal" ? "No active faults" : "Requires attention"}</em>`;
   }
 
+  function collectSample() {
+    const readings = machines.map((machine) => Object.fromEntries(
+      Object.keys(metricConfig).map((metric) => [metric, machineValue(machine, metric)])
+    ));
+    history.push({ elapsed: state.elapsed, timestamp: new Date().toISOString(), readings });
+    while (history.length && state.elapsed - history[0].elapsed > 60) history.shift();
+    state.points += machines.length * Object.keys(metricConfig).length;
+  }
+
   function renderChart() {
-    const machine = machines[state.machineIndex];
     const config = metricConfig[state.metric];
-    const low = config.min;
-    const high = config.max;
-    const points = samples.map((sample, index) => {
-      const wobble = Math.sin(index * 0.62 + Date.now() / 1600) * (high - low) * 0.055;
-      const scenarioShift = hasFault(state.machineIndex)
-        ? state.scenario === "overheat" && state.metric === "temperature" ? 12
-          : state.scenario === "bearing" && state.metric === "vibration" ? 2
-            : state.scenario === "pressure" && state.metric === "pressure" ? Math.sin(index * 1.4) * 1.8
-              : state.scenario === "coating" && state.metric === "temperature" ? Math.sin(index * 0.9) * 4 : 0
-        : 0;
-      const value = Math.min(high - 0.3, Math.max(low + 0.3, machine[ state.metric ] + wobble + scenarioShift));
-      return { x: (index / (samples.length - 1)) * 700, y: 150 - ((value - low) / (high - low)) * 135 };
-    });
+    const values = history.map((sample) => sample.readings[state.machineIndex][state.metric]);
+    const low = Math.min(config.min, ...values.map((value) => Math.floor(value - 1)));
+    const high = Math.max(config.max, ...values.map((value) => Math.ceil(value + 1)));
+    const points = history.map((sample) => ({
+      x: (1 - (state.elapsed - sample.elapsed) / 60) * 700,
+      y: 150 - ((sample.readings[state.machineIndex][state.metric] - low) / (high - low)) * 135,
+    }));
     const line = points.map((point, index) => `${index ? "L" : "M"}${point.x.toFixed(1)} ${point.y.toFixed(1)}`).join("");
     $("#line").setAttribute("d", line);
-    $("#area").setAttribute("d", `${line} L700 160 L0 160 Z`);
-    $(".axis").innerHTML = config.axis.map((value) => `<span>${value}</span>`).join("");
+    $("#area").setAttribute("d", points.length ? `${line} L700 160 L${points[0].x.toFixed(1)} 160 Z` : "");
+    $(".axis").innerHTML = Array.from({ length: 4 }, (_, index) => `<span>${(high - index * (high - low) / 3).toFixed(1)}</span>`).join("");
     $("#legend").textContent = config.label;
+    $("#chart").setAttribute("aria-label", `${machines[state.machineIndex].name}: ${config.label}, latest ${values.at(-1)?.toFixed(1)} ${config.unit}`);
+  }
+
+  function escapeText(value) {
+    return String(value).replace(/[&<>"']/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[character]);
+  }
+
+  function eventMarkup(event) {
+    const timestamp = escapeText(event.timestamp);
+    return `<div class="event"><span class="event-mark ${event.warning ? "warning" : ""}" aria-label="${event.warning ? "Warning" : "Information"}">${event.warning ? "!" : "✓"}</span>
+      <div class="event-copy">${escapeText(event.text)}<small><time datetime="${timestamp}">${escapeText(new Date(event.timestamp).toLocaleString())}</time> · Session ${event.session}</small></div></div>`;
+  }
+
+  function addEvent(text, warning = false) {
+    events.unshift({ text, warning, timestamp: new Date().toISOString(), session: state.session });
+    events.length = Math.min(events.length, 100);
+    renderEvents();
+    if ($("#activity-dialog").open) renderActivity();
+    saveSession();
   }
 
   function renderEvents() {
-    $("#events").innerHTML = events.slice(0, 4).map((event) => `
-      <div class="event"><span class="event-mark ${event.warning ? "warning" : ""}">${event.icon}</span>
-      <div class="event-copy">${event.text}<small>${event.time}</small></div></div>`).join("");
+    $("#events").innerHTML = events.slice(0, 4).map(eventMarkup).join("");
+  }
+
+  function renderActivity() {
+    const visible = events.filter((event) => $("#activity-filter").value !== "warnings" || event.warning);
+    $("#activity-count").textContent = `${visible.length} of ${events.length} events · Latest 100 retained on this device`;
+    $("#activity-list").innerHTML = visible.length ? visible.map(eventMarkup).join("") : '<p class="activity-empty">No warning events recorded.</p>';
   }
 
   function updateElapsed() {
-    const seconds = Math.floor((Date.now() - state.startedAt) / 1000);
+    const seconds = Math.floor(state.elapsed);
     const hours = String(Math.floor(seconds / 3600)).padStart(2, "0");
     const minutes = String(Math.floor((seconds % 3600) / 60)).padStart(2, "0");
     const remainder = String(seconds % 60).padStart(2, "0");
@@ -136,6 +224,7 @@
     $("#subtitle").textContent = titles[view];
     $$("nav button").forEach((button) => button.classList.toggle("active", button.dataset.view === view));
     if (view !== "overview") renderAlternate(view);
+    saveSession();
   }
 
   function renderAlternate(view) {
@@ -163,21 +252,23 @@
     } else if (view === "maintenance") {
       alternate.innerHTML = `<p class="alternate-intro">Maintenance indicators are illustrative and derived from this synthetic session.</p><div class="alternate-grid">${machines.map((machine, index) => `<article class="alternate-card"><div class="machine-status ${hasFault(index) ? "fault" : ""}"><i></i>${hasFault(index) ? "Inspect recommended" : "No action needed"}</div><h3>${machine.name}</h3><p>Vibration trend: ${hasFault(index) && state.scenario === "bearing" ? "Elevated" : "Stable"}<br>Temperature trend: ${hasFault(index) && state.scenario === "overheat" ? "Elevated" : "Stable"}<br>Next review: ${hasFault(index) ? "Recommended now" : "In 30 days"}</p></article>`).join("")}</div>`;
     } else {
-      const rows = machines.flatMap((machine) => ["temperature", "pressure", "vibration"].map((metric) => `<tr><td>${new Date().toLocaleTimeString()}</td><td>${machine.name}</td><td>${metricConfig[metric].label}</td><td>${machineValue(machine, metric).toFixed(2)} ${metricConfig[metric].unit}</td><td>${hasFault(machines.indexOf(machine)) ? scenarios[state.scenario].label : "Normal"}</td></tr>`));
+      const rows = machines.flatMap((machine) => ["temperature", "pressure", "vibration"].map((metric) => `<tr><td>${new Date(history.at(-1).timestamp).toLocaleTimeString()}</td><td>${machine.name}</td><td>${metricConfig[metric].label}</td><td>${machineValue(machine, metric).toFixed(2)} ${metricConfig[metric].unit}</td><td>${hasFault(machines.indexOf(machine)) ? scenarios[state.scenario].label : "Normal"}</td></tr>`));
       alternate.innerHTML = `<p class="alternate-intro">Latest live synthetic sensor samples. Export data to save the current fleet snapshot as CSV.</p><div class="panel"><table class="data-table"><thead><tr><th>Timestamp</th><th>Machine</th><th>Metric</th><th>Reading</th><th>Scenario</th></tr></thead><tbody>${rows.join("")}</tbody></table></div>`;
     }
   }
 
   function openSimulation(scenario = "normal") {
     $("#scenario").value = scenario;
+    $("#target").value = String(state.targetIndex);
+    $("#speed").value = String(state.speed);
     $("#dialog").showModal();
   }
 
   function exportData() {
     const rows = [["timestamp", "machine", "metric", "value", "unit", "scenario"]];
-    const timestamp = new Date().toISOString();
+    const timestamp = history.at(-1).timestamp;
     machines.forEach((machine, index) => Object.entries(metricConfig).forEach(([metric, config]) => {
-      rows.push([timestamp, machine.name, config.label, machineValue(machine, metric).toFixed(2), config.unit, hasFault(index) ? scenarios[state.scenario].label : "Normal"]);
+      rows.push([timestamp, machine.name, config.label, history.at(-1).readings[index][metric].toFixed(2), config.unit, hasFault(index) ? scenarios[state.scenario].label : "Normal"]);
     }));
     const csv = rows.map((row) => row.map((value) => `"${String(value).replaceAll('"', '""')}"`).join(",")).join("\r\n");
     const url = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
@@ -186,6 +277,7 @@
     link.download = `sias-simulator-session-${state.session}.csv`;
     link.click();
     URL.revokeObjectURL(url);
+    addEvent("Synthetic fleet snapshot exported as CSV");
     showToast("Synthetic fleet data exported as CSV.");
   }
 
@@ -193,11 +285,13 @@
   $("#chart-machine").addEventListener("change", (event) => {
     state.machineIndex = Number(event.target.value);
     renderChart();
+    saveSession();
   });
   $$("#chart-tabs button").forEach((button) => button.addEventListener("click", () => {
     state.metric = button.dataset.metric;
     $$("#chart-tabs button").forEach((tab) => tab.classList.toggle("selected", tab === button));
     renderChart();
+    saveSession();
   }));
   $("#new-sim").addEventListener("click", () => openSimulation());
   $("#close-dialog").addEventListener("click", () => $("#dialog").close());
@@ -208,19 +302,23 @@
     event.preventDefault();
     const machineIndex = Number($("#target").value);
     state.machineIndex = machineIndex;
+    state.targetIndex = machineIndex;
+    state.speed = Number($("#speed").value);
     state.scenario = $("#scenario").value;
     state.session += 1;
-    state.startedAt = Date.now();
+    state.paused = false;
+    state.elapsed = 0;
+    state.lastTick = Date.now();
     state.points = 0;
+    history.length = 0;
+    collectSample();
+    updateElapsed();
     $("#chart-machine").value = String(machineIndex);
-    $(".status-strip .muted b").textContent = `SIM-2024-${String(state.session).padStart(4, "0")}`;
-    events.unshift({
-      icon: state.scenario === "normal" ? "✓" : "!",
-      warning: state.scenario !== "normal",
-      text: `<b>${machines[machineIndex].name}</b> · ${scenarios[state.scenario].label} started`,
-      time: "Just now",
-    });
+    $(".status-strip .muted b").textContent = `SIM-${new Date().getFullYear()}-${String(state.session).padStart(4, "0")}`;
+    addEvent(`${machines[machineIndex].name} · ${scenarios[state.scenario].label} started at ${state.speed}× speed`, state.scenario !== "normal");
     $("#dialog").close();
+    renderRunState();
+    saveSession();
     renderMachines();
     renderChart();
     renderEvents();
@@ -230,18 +328,62 @@
   $("#export").addEventListener("click", exportData);
   $("#manage").addEventListener("click", () => setView("machines"));
   $("#help").addEventListener("click", () => showToast("All readings are synthetic; no physical machines are connected."));
-  $("#all-events").addEventListener("click", () => showToast("Showing the latest activity for this local session."));
+  $("#all-events").addEventListener("click", () => {
+    renderActivity();
+    $("#activity-dialog").showModal();
+  });
+  $("#activity-filter").addEventListener("change", renderActivity);
+  $("#close-activity").addEventListener("click", () => $("#activity-dialog").close());
+  $("#activity-dialog").addEventListener("click", (event) => {
+    if (event.target === $("#activity-dialog")) $("#activity-dialog").close();
+  });
 
+  const restored = restoreSession();
+  if (!restored) collectSample();
+  addEvent(restored ? "Session restored from this device" : "Simulation engine started generating synthetic telemetry");
+  $(".status-strip .muted b").textContent = `SIM-${new Date().getFullYear()}-${String(state.session).padStart(4, "0")}`;
+  $("#chart-machine").value = String(state.machineIndex);
+  $$("#chart-tabs button").forEach((tab) => tab.classList.toggle("selected", tab.dataset.metric === state.metric));
+  renderRunState();
   renderMachines();
   renderChart();
   renderEvents();
   updateElapsed();
-  setInterval(() => {
-    state.points += Math.floor(Math.random() * 6) + 1;
-    $("#points").textContent = state.points.toLocaleString();
+  setView(state.activeView);
+
+  function advanceSimulation() {
+    const now = Date.now();
+    if (state.paused) {
+      state.lastTick = now;
+      return;
+    }
+    const steps = Math.floor((now - state.lastTick) / 1000);
+    if (!steps) return;
+    state.lastTick += steps * 1000;
+    const totalSteps = steps * state.speed;
+    const skippedSteps = Math.max(0, totalSteps - 60);
+    state.elapsed += skippedSteps;
+    state.points += skippedSteps * machines.length * Object.keys(metricConfig).length;
+    for (let step = 0; step < Math.min(totalSteps, 60); step += 1) {
+      state.elapsed += 1;
+      collectSample();
+    }
     updateElapsed();
     renderMachines();
     renderChart();
     if (state.activeView !== "overview") renderAlternate(state.activeView);
-  }, 2000);
+    saveSession();
+  }
+
+  $("#pause-sim").addEventListener("click", () => {
+    advanceSimulation();
+    state.paused = !state.paused;
+    addEvent(state.paused ? "Simulation paused" : "Simulation resumed");
+    state.lastTick = Date.now();
+    renderRunState();
+    saveSession();
+    showToast(state.paused ? "Simulation paused. Readings are frozen for inspection." : "Simulation resumed.");
+  });
+  window.addEventListener("pagehide", saveSession);
+  setInterval(advanceSimulation, 1000);
 })();
