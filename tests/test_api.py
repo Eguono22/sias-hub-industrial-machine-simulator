@@ -14,6 +14,10 @@ class SimulatorAPITests(unittest.TestCase):
         self.assertIn('source-mode', self.client.get('/').text)
         self.assertIn('fetchFleet', self.client.get('/app.js').text)
         self.assertIn('source-controls', self.client.get('/style.css').text)
+        artwork = self.client.get('/assets/extruder.png')
+        self.assertEqual(artwork.status_code, 200)
+        self.assertEqual(artwork.headers['content-type'], 'image/png')
+        self.assertTrue(artwork.content.startswith(b'\x89PNG\r\n\x1a\n'))
         self.assertEqual(self.client.get('/health').json()['status'], 'ok')
 
     def test_catalog_and_scenarios(self):

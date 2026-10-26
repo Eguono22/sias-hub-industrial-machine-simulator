@@ -183,6 +183,12 @@
     $("#run-status").textContent = state.paused ? "Simulation paused" : `Simulation running · ${state.speed}×`;
     $("#stream-status").textContent = state.paused ? "PAUSED" : "LIVE DATA";
     $(".status-strip").classList.toggle("paused", state.paused);
+    $("#engine-status").textContent = state.paused ? "Paused" : "Running";
+    $("#engine-status").style.color = state.paused ? "var(--amber)" : "var(--green)";
+    $(".engine > i").style.background = state.paused ? "var(--amber)" : "var(--green)";
+    $("#engine-speed").textContent = `${state.speed}× (${state.speed === 1 ? "Real time" : "Accelerated"})`;
+    $(".live-inline").textContent = state.paused ? "● PAUSED" : "● STREAMING";
+    $(".stage-caption > span:first-child").innerHTML = `<i></i>${state.paused ? "SENSOR STREAM PAUSED" : "SENSOR STREAM CONNECTED"}`;
   }
 
   function showToast(message) {
@@ -209,25 +215,71 @@
     return machineIndex === state.targetIndex && state.scenario !== "normal";
   }
 
+  function machineHealth(index) {
+    if (apiMode && history.length) return Math.round(history.at(-1).readings[index].health);
+    return hasFault(index) ? 50 : 100;
+  }
+
   function renderMachines() {
     $("#machines").innerHTML = machines.map((machine, index) => {
       const fault = hasFault(index);
-      return `<article class="machine-card">
-        <div class="machine-top"><span class="machine-icon">${index < 2 ? "⬡" : "◇"}</span><span class="machine-status ${fault ? "fault" : ""}"><i></i>${fault ? "Attention" : "Operational"}</span></div>
-        <h3>${escapeText(machine.name)}</h3><div class="machine-type">${escapeText(machine.kind)} · ${escapeText(machine.id)}</div>
-        <div class="machine-readings">
-          <div><span>Temperature</span><b>${machineValue(machine, "temperature").toFixed(1)} °C</b></div>
-          <div><span>Pressure</span><b>${machineValue(machine, "pressure").toFixed(1)} bar</b></div>
-        </div>
-      </article>`;
+      const health = machineHealth(index);
+      return `<button type="button" class="machine-card ${index === state.machineIndex ? "selected-machine" : ""}" data-select-machine="${index}" aria-pressed="${index === state.machineIndex}">
+        <div class="machine-main"><img class="machine-thumbnail" src="assets/extruder.png" alt=""><div class="machine-info"><h3>${escapeText(machine.name)}</h3><div class="machine-type">${escapeText(machine.kind)}</div><span class="machine-status ${fault ? "fault" : ""}"><i></i>${fault ? "Attention" : "Running"}</span></div><div class="mini-health" style="--score:${health};--ring:${health < 60 ? "var(--red)" : health < 85 ? "var(--amber)" : "var(--green)"}" aria-label="Health score ${health} percent"><strong>${health}</strong></div></div>
+        <div class="machine-readings"><div><span>Temperature</span><b>${machineValue(machine, "temperature").toFixed(1)} °C</b></div><div><span>Pressure</span><b>${machineValue(machine, "pressure").toFixed(1)} bar</b></div><div><span>Vibration</span><b>${machineValue(machine, "vibration").toFixed(1)} mm/s</b></div></div>
+      </button>`;
     }).join("");
     $("#fault-summary").textContent = state.scenario === "normal" ? "Across 0 machines" : "Across 1 machine";
-    const health = apiMode ? (history.at(-1).readings.reduce((sum, reading) => sum + reading.health, 0) / machines.length).toFixed(1) : state.scenario === "normal" ? "100" : "87.5";
-    $("#health").innerHTML = `${health} <em>%</em>`;
+    const health = (machines.reduce((sum, _, index) => sum + machineHealth(index), 0) / machines.length).toFixed(1);
+    $("#health").textContent = `${health}%`;
     $("#points").textContent = state.points.toLocaleString();
-    const activeCount = machines.length;
-    $("#active-count").innerHTML = `${activeCount} <em>/ ${machines.length}</em>`;
-    $("#fault-count").innerHTML = `${state.scenario === "normal" ? 0 : 1} <em class="warning">${state.scenario === "normal" ? "No active faults" : "Requires attention"}</em>`;
+    $("#engine-points").textContent = state.points.toLocaleString();
+    $("#active-count").textContent = `${machines.length} / ${machines.length}`;
+    $("#fault-count").textContent = state.scenario === "normal" ? "0" : "1";
+    renderTwin();
+  }
+
+  let twinView = "model";
+
+  function renderTwin() {
+    const machine = machines[state.machineIndex];
+    const health = machineHealth(state.machineIndex);
+    $("#twin-title").textContent = `${machine.name} – Live digital twin`;
+    $("#selected-health").textContent = health;
+    $("#health-gauge").style.setProperty("--score", health);
+    const color = health < 60 ? "var(--red)" : health < 85 ? "var(--amber)" : "var(--green)";
+    $("#health-gauge").style.setProperty("--ring", color);
+    $("#health-label").textContent = health < 60 ? "Inspect" : health < 85 ? "Attention" : "Good";
+    $("#health-label").style.color = color;
+    $("#normal-machines").textContent = machines.filter((_, index) => !hasFault(index)).length;
+    $("#warning-machines").textContent = machines.filter((_, index) => hasFault(index)).length;
+    $("#connected-machines").textContent = machines.length;
+    for (const metric of Object.keys(metricConfig)) {
+      $("#sensor-" + metric).textContent = `${machineValue(machine, metric).toFixed(1)} ${metricConfig[metric].unit}`;
+    }
+    $("#twin-stage").hidden = twinView !== "model";
+    $("#twin-detail").hidden = twinView === "model";
+    if (twinView === "schematic") {
+      const coating = machine.kind.toLowerCase().includes("coating");
+      $("#twin-detail").innerHTML = `<div class="schematic" aria-label="Illustrative process schematic">${(coating ? ["Material feed", "Coating unit", "Drying zone", "Output"] : ["Material feed", "Drive unit", "Heated barrel", "Die / output"]).map((label, index) => `${index ? '<span aria-hidden="true">→</span>' : ""}<div>${label}</div>`).join("")}</div><p class="health-footnote">Illustrative process flow · ${escapeText(machine.name)}</p>`;
+    } else if (twinView === "parameters") {
+      $("#twin-detail").innerHTML = `<div class="parameter-grid">${Object.entries(metricConfig).map(([metric, config]) => `<div>${config.label}<strong>${machineValue(machine, metric).toFixed(1)} <small>${config.unit}</small></strong></div>`).join("")}</div><p class="health-footnote">Live synthetic readings · ${escapeText(machine.name)}</p>`;
+    }
+  }
+
+  function renderSecondaryCharts() {
+    for (const metric of Object.keys(metricConfig)) {
+      const config = metricConfig[metric];
+      const values = history.map((sample) => sample.readings[state.machineIndex][metric]);
+      $("#" + metric + "-current").textContent = `${values.at(-1).toFixed(1)} ${config.unit}`;
+      if (metric === "temperature") continue;
+      const low = Math.min(...values) - (metric === "pressure" ? 1 : 0.5);
+      const high = Math.max(...values) + (metric === "pressure" ? 1 : 0.5);
+      const path = history.map((sample, index) => `${index ? "L" : "M"}${((1 - (state.elapsed - sample.elapsed) / 60) * 700).toFixed(1)} ${(150 - ((values[index] - low) / (high - low)) * 135).toFixed(1)}`).join("");
+      $("#" + metric + "-line").setAttribute("d", path);
+      $("#" + metric + "-chart").setAttribute("aria-label", `${machines[state.machineIndex].name}: ${config.label}, latest ${values.at(-1).toFixed(1)} ${config.unit}`);
+      $("#" + metric + "-axis").innerHTML = Array.from({ length: 4 }, (_, index) => `<span>${(high - index * (high - low) / 3).toFixed(1)}</span>`).join("");
+    }
   }
 
   function collectSample() {
@@ -240,7 +292,11 @@
   }
 
   function renderChart() {
+    renderSecondaryCharts();
+    renderTwin();
+    $(".telemetry .panel-head h2").innerHTML = `<span class="metric-icon">${state.metric === "temperature" ? "♨" : state.metric === "pressure" ? "◴" : "ϟ"}</span> ${metricConfig[state.metric].label} <span class="unit">(${metricConfig[state.metric].unit})</span>`;
     const config = metricConfig[state.metric];
+    $("#temperature-current").textContent = `${history.at(-1).readings[state.machineIndex][state.metric].toFixed(1)} ${config.unit}`;
     const values = history.map((sample) => sample.readings[state.machineIndex][state.metric]);
     const low = Math.min(apiMode ? Infinity : config.min, ...values.map((value) => Math.floor(value - 1)));
     const high = Math.max(apiMode ? -Infinity : config.max, ...values.map((value) => Math.ceil(value + 1)));
@@ -275,7 +331,7 @@
   }
 
   function renderEvents() {
-    $("#events").innerHTML = events.slice(0, 4).map(eventMarkup).join("");
+    $("#events").innerHTML = events.slice(0, 3).map(eventMarkup).join("");
   }
 
   function renderActivity() {
@@ -290,16 +346,17 @@
     const minutes = String(Math.floor((seconds % 3600) / 60)).padStart(2, "0");
     const remainder = String(seconds % 60).padStart(2, "0");
     $("#elapsed").textContent = `${hours}:${minutes}:${remainder}`;
+    $("#engine-uptime").textContent = `${hours}:${minutes}:${remainder}`;
   }
 
   function setView(view) {
     state.activeView = view;
     const names = {
-      overview: "Overview", machines: "Machine fleet", scenarios: "Fault scenarios",
+      overview: "Industrial Machine Simulator", machines: "Machine fleet", scenarios: "Fault scenarios",
       twins: "Digital twins", maintenance: "Predictive maintenance", data: "Data explorer",
     };
     const titles = {
-      overview: "Your industrial systems. Simulated in real time.",
+      overview: "Real-time machine simulation for research and development.",
       machines: "Monitor your connected synthetic machines.",
       scenarios: "Explore industrial fault conditions safely.",
       twins: "Digital representations of your machine fleet.",
@@ -307,7 +364,7 @@
       data: "Inspect recent synthetic sensor readings.",
     };
     $$("#overview, #alternate").forEach((element) => { element.hidden = view !== "overview" ? element.id === "overview" : element.id === "alternate"; });
-    $$("#title, #breadcrumb").forEach((element) => { element.textContent = names[view]; });
+    $$("#title, #breadcrumb").forEach((element) => { element.textContent = element.id === "breadcrumb" && view === "overview" ? "Dashboard" : names[view]; });
     $("#subtitle").textContent = titles[view];
     $$("nav button").forEach((button) => button.classList.toggle("active", button.dataset.view === view));
     if (view !== "overview") renderAlternate(view);
@@ -368,6 +425,23 @@
     showToast("Synthetic fleet data exported as CSV.");
   }
 
+  $("#machines").addEventListener("click", (event) => {
+    const card = event.target.closest("[data-select-machine]");
+    if (!card) return;
+    state.machineIndex = Number(card.dataset.selectMachine);
+    $("#chart-machine").value = String(state.machineIndex);
+    renderMachines();
+    renderChart();
+    saveSession();
+  });
+  $$("[data-twin]").forEach((button) => button.addEventListener("click", () => {
+    twinView = button.dataset.twin;
+    $$("[data-twin]").forEach((tab) => {
+      tab.classList.toggle("selected", tab === button);
+      tab.setAttribute("aria-pressed", String(tab === button));
+    });
+    renderTwin();
+  }));
   setBusy(true);
   await initializeSource();
   $("#source-mode").addEventListener("change", (event) => {
@@ -378,6 +452,7 @@
   $$("nav button").forEach((button) => button.addEventListener("click", () => setView(button.dataset.view)));
   $("#chart-machine").addEventListener("change", (event) => {
     state.machineIndex = Number(event.target.value);
+    renderMachines();
     renderChart();
     saveSession();
   });

@@ -65,6 +65,8 @@ The fleet endpoint `/fleet/telemetry?target=extruder-01&scenario=bearing_wear&st
 
 ## Standalone dashboard
 
+The dashboard uses a dark industrial layout with selectable machine cards, a live health gauge, activity alerts, and temperature, pressure, and vibration charts. Select a machine card or use the telemetry selector to update the sensor overlay and charts. The digital-twin panel includes machine, schematic, and parameter views; its machine artwork is illustrative.
+
 The browser-only dashboard lives in `simulator/dist/`. Serve that directory with a static HTTP server, for example `python3 -m http.server 8080 --directory simulator/dist`, then open http://localhost:8080/.
 
 - Pause freezes readings, elapsed simulation time, and counters; Resume continues from that point.
