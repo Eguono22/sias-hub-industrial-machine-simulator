@@ -211,3 +211,8 @@ dialog::backdrop { background: rgb(20 37 44 / 38%); }
 #activity-list .event { padding: 13px 0; }
 #activity-list .event-copy { overflow-wrap: anywhere; font-size: 12px; }
 #activity-list .event-copy small { font-size: 10px; }
+
+.source-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; margin-bottom: 12px; color: var(--muted); font-size: 11px; }
+.source-controls label { display: flex; align-items: center; gap: 8px; }
+.source-controls select { padding: 6px 9px; border: 1px solid var(--line); border-radius: 5px; background: #fff; color: var(--ink); font: inherit; }
+button:disabled { cursor: wait; opacity: .6; }

@@ -108,6 +108,7 @@ def build_machine_catalog() -> List[Dict[str, Any]]:
             "asset_class": machine["asset_class"],
             "location": machine["location"],
             "status": machine["status"],
+            "baseline": machine["baseline"],
         }
         for machine in MACHINE_LIBRARY
     ]
@@ -161,9 +162,8 @@ def get_machine_snapshot(machine_id: str) -> Dict[str, Any]:
         raise ValueError(f"Machine not found: {machine_id}")
 
     scenario = "normal"
-    telemetry = generate_telemetry(machine_id, machine["type"], duration_minutes=10, scenario=scenario, sample_rate_hz=1.0)
-    latest = telemetry[-1]
-    health_score = max(35.0, 100.0 - (FAULT_SCENARIOS[scenario]["severity"] * 30))
+    latest = get_telemetry_sample(machine_id, 0, scenario)
+    health_score = latest["health_score"]
 
     return {
         "machine_id": machine_id,
@@ -183,6 +183,55 @@ def get_machine_snapshot(machine_id: str) -> Dict[str, Any]:
     }
 
 
+def get_telemetry_sample(machine_id: str, index: float = 0, scenario: str = "normal", timestamp: datetime | None = None) -> Dict[str, Any]:
+    machine = get_machine(machine_id)
+    if machine is None:
+        raise ValueError(f"Machine not found: {machine_id}")
+    if scenario not in FAULT_SCENARIOS:
+        raise ValueError(f"Unknown scenario: {scenario}")
+    scenario_name = scenario
+    machine_type = machine["type"]
+    base = machine["baseline"]
+
+    sensor_values = {
+        "temperature_c": _sample_value(base.get("temperature_c", 50), index, scenario_name, "temperature_c"),
+        "pressure_bar": _sample_value(base.get("pressure_bar", 30), index, scenario_name, "pressure_bar"),
+        "vibration_mm_s": _sample_value(base.get("vibration_mm_s", 2.0), index, scenario_name, "vibration_mm_s"),
+        "power_kw": _sample_value(base.get("power_kw", 25), index, scenario_name, "power_kw"),
+        "flow_l_min": _sample_value(base.get("flow_l_min", 150), index, scenario_name, "flow_l_min"),
+        "motor_speed_rpm": _sample_value(base.get("motor_speed_rpm", 800), index, scenario_name, "motor_speed_rpm"),
+    }
+
+    if machine_type == "coating":
+        sensor_values["coating_thickness_um"] = _sample_value(base.get("coating_thickness_um", 120), index, scenario_name, "coating_thickness_um")
+        sensor_values["viscosity_cP"] = _sample_value(base.get("viscosity_cP", 2200), index, scenario_name, "viscosity_cP")
+
+    health_score = max(35.0, 100.0 - (FAULT_SCENARIOS[scenario_name]["severity"] * 65))
+    health_score -= max(0.0, abs(sensor_values["temperature_c"] - base.get("temperature_c", 50)) * 0.2)
+    health_score -= max(0.0, abs(sensor_values["vibration_mm_s"] - base.get("vibration_mm_s", 2.0)) * 2.0)
+    health_score = max(0.0, min(100.0, health_score))
+
+    sample = {
+        "timestamp": (timestamp or datetime.now(timezone.utc)).isoformat(),
+        "machine_id": machine_id,
+        "scenario": scenario_name,
+        "machine_type": machine_type,
+        "temperature_c": round(sensor_values["temperature_c"], 2),
+        "pressure_bar": round(sensor_values["pressure_bar"], 2),
+        "vibration_mm_s": round(sensor_values["vibration_mm_s"], 2),
+        "power_kw": round(sensor_values["power_kw"], 2),
+        "flow_l_min": round(sensor_values["flow_l_min"], 2),
+        "motor_speed_rpm": round(sensor_values["motor_speed_rpm"], 2),
+        "health_score": round(health_score, 2),
+    }
+
+    if machine_type == "coating":
+        sample["coating_thickness_um"] = round(sensor_values["coating_thickness_um"], 2)
+        sample["viscosity_cP"] = round(sensor_values["viscosity_cP"], 2)
+
+    return sample
+
+
 def generate_telemetry(
     machine_id: str,
     machine_type: str,
@@ -190,62 +239,16 @@ def generate_telemetry(
     scenario: str = "normal",
     sample_rate_hz: float = 1.0,
 ) -> List[Dict[str, Any]]:
-    scenario_name = scenario.lower()
-    if scenario_name not in FAULT_SCENARIOS:
-        scenario_name = "normal"
-
-    machine = get_machine(machine_id)
-    if machine is None:
-        raise ValueError(f"Machine not found: {machine_id}")
-
-    sample_interval_seconds = max(1.0, 1.0 / sample_rate_hz)
-    total_samples = max(1, int((duration_minutes * 60) / sample_interval_seconds))
+    if scenario not in FAULT_SCENARIOS:
+        raise ValueError(f"Unknown scenario: {scenario}")
+    if not math.isfinite(sample_rate_hz) or sample_rate_hz <= 0 or not math.isfinite(duration_minutes) or duration_minutes <= 0:
+        raise ValueError("Duration and sample rate must be positive and finite")
+    total_samples = max(1, int(duration_minutes * 60 * sample_rate_hz))
+    if total_samples > 10000:
+        raise ValueError("Requested telemetry exceeds 10000 samples")
     start_time = datetime.now(timezone.utc)
-
-    telemetry: List[Dict[str, Any]] = []
-    for index in range(total_samples):
-        timestamp = start_time + timedelta(seconds=index * sample_interval_seconds)
-        base = machine["baseline"]
-
-        sensor_values = {
-            "temperature_c": _sample_value(base.get("temperature_c", 50), index, scenario_name, "temperature_c"),
-            "pressure_bar": _sample_value(base.get("pressure_bar", 30), index, scenario_name, "pressure_bar"),
-            "vibration_mm_s": _sample_value(base.get("vibration_mm_s", 2.0), index, scenario_name, "vibration_mm_s"),
-            "power_kw": _sample_value(base.get("power_kw", 25), index, scenario_name, "power_kw"),
-            "flow_l_min": _sample_value(base.get("flow_l_min", 150), index, scenario_name, "flow_l_min"),
-            "motor_speed_rpm": _sample_value(base.get("motor_speed_rpm", 800), index, scenario_name, "motor_speed_rpm"),
-        }
-
-        if machine_type == "coating":
-            sensor_values["coating_thickness_um"] = _sample_value(base.get("coating_thickness_um", 120), index, scenario_name, "coating_thickness_um")
-            sensor_values["viscosity_cP"] = _sample_value(base.get("viscosity_cP", 2200), index, scenario_name, "viscosity_cP")
-
-        health_score = max(35.0, 100.0 - (FAULT_SCENARIOS[scenario_name]["severity"] * 65))
-        health_score -= max(0.0, abs(sensor_values["temperature_c"] - base.get("temperature_c", 50)) * 0.2)
-        health_score -= max(0.0, abs(sensor_values["vibration_mm_s"] - base.get("vibration_mm_s", 2.0)) * 2.0)
-        health_score = max(0.0, min(100.0, health_score))
-
-        sample = {
-            "timestamp": timestamp.isoformat(),
-            "machine_id": machine_id,
-            "scenario": scenario_name,
-            "machine_type": machine_type,
-            "temperature_c": round(sensor_values["temperature_c"], 2),
-            "pressure_bar": round(sensor_values["pressure_bar"], 2),
-            "vibration_mm_s": round(sensor_values["vibration_mm_s"], 2),
-            "power_kw": round(sensor_values["power_kw"], 2),
-            "flow_l_min": round(sensor_values["flow_l_min"], 2),
-            "motor_speed_rpm": round(sensor_values["motor_speed_rpm"], 2),
-            "health_score": round(health_score, 2),
-        }
-
-        if machine_type == "coating":
-            sample["coating_thickness_um"] = round(sensor_values["coating_thickness_um"], 2)
-            sample["viscosity_cP"] = round(sensor_values["viscosity_cP"], 2)
-
-        telemetry.append(sample)
-
-    return telemetry
+    return [get_telemetry_sample(machine_id, index / sample_rate_hz, scenario,
+            start_time + timedelta(seconds=index / sample_rate_hz)) for index in range(total_samples)]
 
 
 if __name__ == "__main__":

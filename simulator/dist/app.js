@@ -1,4 +1,4 @@
-(() => {
+(async () => {
   "use strict";
 
   const machines = [
@@ -15,7 +15,7 @@
     coating: { label: "Coating inconsistency", description: "Variable coating-line readings to evaluate quality drift." },
   };
   const metricConfig = {
-    temperature: { label: "Barrel temperature", unit: "°C", min: 190, max: 220, axis: [220, 210, 200, 190] },
+    temperature: { label: "Temperature", unit: "°C", min: 190, max: 220, axis: [220, 210, 200, 190] },
     pressure: { label: "Line pressure", unit: "bar", min: 5, max: 11, axis: [11, 9, 7, 5] },
     vibration: { label: "Vibration", unit: "mm/s", min: 0, max: 8, axis: [8, 6, 4, 2] },
   };
@@ -38,7 +38,92 @@
   const $$ = (selector) => [...document.querySelectorAll(selector)];
   let toastTimer;
 
-  const storageKey = "sias-simulator-session-v1";
+  const parameters = new URLSearchParams(location.search);
+  const apiBase = (parameters.get("api") || location.origin).replace(/\/$/, "");
+  let apiMode = false;
+  let busy = false;
+  let storageKey = "sias-simulator-session-v1";
+
+  async function apiRequest(path) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 5000);
+    try {
+      const response = await fetch(`${apiBase}${path}`, { signal: controller.signal });
+      if (!response.ok) throw new Error(`API request failed (${response.status})`);
+      return await response.json();
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
+  function setBusy(value) {
+    busy = value;
+    ["#new-sim", "#pause-sim", "#export", "#simulation-form button[type=submit]", "#target", "#scenario", "#speed"].forEach((selector) => { $(selector).disabled = value; });
+  }
+
+  async function initializeSource() {
+    if (parameters.get("mode") !== "demo" && /^https?:/.test(apiBase)) {
+      try {
+        const [catalog, faults] = await Promise.all([apiRequest("/machines"), apiRequest("/fault-scenarios")]);
+        if (!Array.isArray(catalog.machines) || !catalog.machines.length || !faults.fault_scenarios?.normal) throw new Error("Invalid API catalog");
+        const fleet = catalog.machines.map((machine) => {
+          if (!["id", "name", "type"].every((key) => typeof machine[key] === "string")
+            || !["temperature_c", "pressure_bar", "vibration_mm_s"].every((key) => Number.isFinite(machine.baseline?.[key]))) throw new Error("Invalid machine model");
+          return { id: machine.id, name: machine.name, kind: machine.type, temperature: machine.baseline.temperature_c, pressure: machine.baseline.pressure_bar, vibration: machine.baseline.vibration_mm_s };
+        });
+        const faultOptions = Object.fromEntries(Object.entries(faults.fault_scenarios).map(([key, value]) => {
+          if (typeof value.description !== "string") throw new Error("Invalid scenario");
+          return [key, { label: key.replaceAll("_", " ").replace(/^./, (letter) => letter.toUpperCase()), description: value.description }];
+        }));
+        machines.splice(0, machines.length, ...fleet);
+        Object.keys(scenarios).forEach((key) => delete scenarios[key]);
+        Object.assign(scenarios, faultOptions);
+        apiMode = true;
+        storageKey = `sias-simulator-api-v1:${apiBase}:${machines.map((machine) => machine.id).join(",")}`;
+      } catch {
+        showToast("API unavailable. Browser demo mode is active.");
+      }
+    }
+    $("#source-mode").value = apiMode ? "api" : "demo";
+    $("#source-description").textContent = apiMode ? "FastAPI · synthetic telemetry" : "Browser demo · synthetic telemetry";
+    const options = machines.map((machine, index) => `<option value="${index}">${escapeText(machine.name)}</option>`).join("");
+    $("#chart-machine").innerHTML = options;
+    $("#target").innerHTML = options;
+    $("#scenario").innerHTML = Object.entries(scenarios).map(([key, scenario]) => `<option value="${escapeText(key)}">${escapeText(scenario.label)}</option>`).join("");
+    $("nav [data-view=machines] b").textContent = machines.length;
+    $(".section-heading h2 span").textContent = `${machines.length} machines`;
+  }
+
+  async function fetchFleet(start, count, targetIndex = state.targetIndex, scenario = state.scenario) {
+    const query = new URLSearchParams({ target: machines[targetIndex].id, scenario, start, count });
+    const data = await apiRequest(`/fleet/telemetry?${query}`);
+    if (!Array.isArray(data.samples) || data.samples.length !== count) throw new Error("Invalid telemetry batch");
+    return data.samples.map((sample, index) => {
+      if (sample.elapsed !== start + index || !Number.isFinite(Date.parse(sample.timestamp)) || !Array.isArray(sample.readings)
+        || sample.readings.length !== machines.length) throw new Error("Invalid telemetry sample");
+      const readings = machines.map((machine) => {
+        const reading = sample.readings.find((value) => value.machine_id === machine.id);
+        if (!reading || !["temperature_c", "pressure_bar", "vibration_mm_s", "health_score"].every((key) => Number.isFinite(reading[key]))) throw new Error("Missing sensor reading");
+        return { temperature: reading.temperature_c, pressure: reading.pressure_bar, vibration: reading.vibration_mm_s, health: reading.health_score };
+      });
+      return { elapsed: sample.elapsed, timestamp: sample.timestamp, readings };
+    });
+  }
+
+  function appendFleet(samples) {
+    history.push(...samples);
+    state.elapsed = samples.at(-1).elapsed;
+    while (history.length && history[0].elapsed < state.elapsed - 60) history.shift();
+    state.points = (state.elapsed + 1) * machines.length * Object.keys(metricConfig).length;
+  }
+
+  function connectionFailed() {
+    state.paused = true;
+    state.lastTick = Date.now();
+    renderRunState();
+    addEvent("API connection lost. Simulation paused; resume to retry.", true);
+    showToast("API unavailable. Simulation paused. Resume to retry.");
+  }
 
   function saveSession() {
     try {
@@ -69,10 +154,10 @@
           || sample.elapsed > value.elapsed || sample.elapsed < value.elapsed - 60
           || typeof sample.timestamp !== "string" || !Number.isFinite(Date.parse(sample.timestamp))
           || !Array.isArray(sample.readings) || sample.readings.length !== machines.length
-          || !sample.readings.every((readings) => readings && Object.keys(metricConfig).every((metric) => Number.isFinite(readings[metric])))) return false;
+          || !sample.readings.every((readings) => readings && (!apiMode || Number.isFinite(readings.health)) && Object.keys(metricConfig).every((metric) => Number.isFinite(readings[metric])))) return false;
         previous = sample.elapsed;
       }
-      if (previous !== value.elapsed || value.points !== (value.elapsed + 1) * 12) return false;
+      if (previous !== value.elapsed || value.points !== (value.elapsed + 1) * machines.length * Object.keys(metricConfig).length) return false;
       for (const key of Object.keys(state)) {
         if (key !== "lastTick") state[key] = value[key];
       }
@@ -109,6 +194,7 @@
   }
 
   function machineValue(machine, metric) {
+    if (apiMode && history.length) return history.at(-1).readings[machines.indexOf(machine)][metric];
     const base = machine[metric];
     const phase = state.elapsed / 1.5 + machines.indexOf(machine);
     const noise = Math.sin(phase) * (metric === "vibration" ? 0.18 : 0.8);
@@ -128,7 +214,7 @@
       const fault = hasFault(index);
       return `<article class="machine-card">
         <div class="machine-top"><span class="machine-icon">${index < 2 ? "⬡" : "◇"}</span><span class="machine-status ${fault ? "fault" : ""}"><i></i>${fault ? "Attention" : "Operational"}</span></div>
-        <h3>${machine.name}</h3><div class="machine-type">${machine.kind} · ${machine.id}</div>
+        <h3>${escapeText(machine.name)}</h3><div class="machine-type">${escapeText(machine.kind)} · ${escapeText(machine.id)}</div>
         <div class="machine-readings">
           <div><span>Temperature</span><b>${machineValue(machine, "temperature").toFixed(1)} °C</b></div>
           <div><span>Pressure</span><b>${machineValue(machine, "pressure").toFixed(1)} bar</b></div>
@@ -136,7 +222,8 @@
       </article>`;
     }).join("");
     $("#fault-summary").textContent = state.scenario === "normal" ? "Across 0 machines" : "Across 1 machine";
-    $("#health").innerHTML = `${state.scenario === "normal" ? "100" : "87.5"} <em>%</em>`;
+    const health = apiMode ? (history.at(-1).readings.reduce((sum, reading) => sum + reading.health, 0) / machines.length).toFixed(1) : state.scenario === "normal" ? "100" : "87.5";
+    $("#health").innerHTML = `${health} <em>%</em>`;
     $("#points").textContent = state.points.toLocaleString();
     const activeCount = machines.length;
     $("#active-count").innerHTML = `${activeCount} <em>/ ${machines.length}</em>`;
@@ -155,8 +242,8 @@
   function renderChart() {
     const config = metricConfig[state.metric];
     const values = history.map((sample) => sample.readings[state.machineIndex][state.metric]);
-    const low = Math.min(config.min, ...values.map((value) => Math.floor(value - 1)));
-    const high = Math.max(config.max, ...values.map((value) => Math.ceil(value + 1)));
+    const low = Math.min(apiMode ? Infinity : config.min, ...values.map((value) => Math.floor(value - 1)));
+    const high = Math.max(apiMode ? -Infinity : config.max, ...values.map((value) => Math.ceil(value + 1)));
     const points = history.map((sample) => ({
       x: (1 - (state.elapsed - sample.elapsed) / 60) * 700,
       y: 150 - ((sample.readings[state.machineIndex][state.metric] - low) / (high - low)) * 135,
@@ -230,7 +317,7 @@
   function renderAlternate(view) {
     const alternate = $("#alternate");
     if (view === "machines") {
-      alternate.innerHTML = `<p class="alternate-intro">All machines in this local simulation workspace.</p><div class="alternate-grid">${machines.map((machine, index) => `<article class="alternate-card"><div class="machine-status ${hasFault(index) ? "fault" : ""}"><i></i>${hasFault(index) ? "Attention" : "Operational"}</div><h3>${machine.name}</h3><p>${machine.kind}. Live synthetic readings are refreshed automatically.</p><p>Temperature: <b>${machineValue(machine, "temperature").toFixed(1)} °C</b><br>Pressure: <b>${machineValue(machine, "pressure").toFixed(1)} bar</b><br>Vibration: <b>${machineValue(machine, "vibration").toFixed(1)} mm/s</b></p><button class="primary view-machine" data-machine="${index}">View telemetry</button></article>`).join("")}</div>`;
+      alternate.innerHTML = `<p class="alternate-intro">All machines in this local simulation workspace.</p><div class="alternate-grid">${machines.map((machine, index) => `<article class="alternate-card"><div class="machine-status ${hasFault(index) ? "fault" : ""}"><i></i>${hasFault(index) ? "Attention" : "Operational"}</div><h3>${escapeText(machine.name)}</h3><p>${escapeText(machine.kind)}. Live synthetic readings are refreshed automatically.</p><p>Temperature: <b>${machineValue(machine, "temperature").toFixed(1)} °C</b><br>Pressure: <b>${machineValue(machine, "pressure").toFixed(1)} bar</b><br>Vibration: <b>${machineValue(machine, "vibration").toFixed(1)} mm/s</b></p><button class="primary view-machine" data-machine="${index}">View telemetry</button></article>`).join("")}</div>`;
       $$(".view-machine").forEach((button) => button.addEventListener("click", () => {
         $("#chart-machine").value = button.dataset.machine;
         state.machineIndex = Number(button.dataset.machine);
@@ -239,10 +326,10 @@
         document.querySelector(".telemetry").scrollIntoView({ behavior: "smooth", block: "center" });
       }));
     } else if (view === "scenarios") {
-      alternate.innerHTML = `<p class="alternate-intro">Choose a synthetic fault to see how sensor signals respond. No physical equipment is connected.</p><div class="alternate-grid">${Object.entries(scenarios).map(([key, scenario]) => `<article class="alternate-card"><h3>${scenario.label}</h3><p>${scenario.description}</p><button class="primary run-scenario" data-scenario="${key}">Run scenario</button></article>`).join("")}</div>`;
+      alternate.innerHTML = `<p class="alternate-intro">Choose a synthetic fault to see how sensor signals respond. No physical equipment is connected.</p><div class="alternate-grid">${Object.entries(scenarios).map(([key, scenario]) => `<article class="alternate-card"><h3>${escapeText(scenario.label)}</h3><p>${escapeText(scenario.description)}</p><button class="primary run-scenario" data-scenario="${key}">Run scenario</button></article>`).join("")}</div>`;
       $$(".run-scenario").forEach((button) => button.addEventListener("click", () => openSimulation(button.dataset.scenario)));
     } else if (view === "twins") {
-      alternate.innerHTML = `<p class="alternate-intro">Local digital-twin representations for the current machine fleet.</p><div class="alternate-grid">${machines.map((machine, index) => `<article class="alternate-card"><div class="machine-status"><i></i> Synchronized</div><h3>${machine.name} twin</h3><p>Model type: ${machine.kind}<br>Telemetry link: Local synthetic stream<br>Last sync: Just now</p><button class="primary view-machine" data-machine="${index}">View telemetry</button></article>`).join("")}</div>`;
+      alternate.innerHTML = `<p class="alternate-intro">Local digital-twin representations for the current machine fleet.</p><div class="alternate-grid">${machines.map((machine, index) => `<article class="alternate-card"><div class="machine-status"><i></i> Synchronized</div><h3>${escapeText(machine.name)} twin</h3><p>Model type: ${escapeText(machine.kind)}<br>Telemetry link: ${apiMode ? "FastAPI synthetic stream" : "Browser synthetic stream"}<br>Last sync: ${escapeText(new Date(history.at(-1).timestamp).toLocaleTimeString())}</p><button class="primary view-machine" data-machine="${index}">View telemetry</button></article>`).join("")}</div>`;
       $$(".view-machine").forEach((button) => button.addEventListener("click", () => {
         $("#chart-machine").value = button.dataset.machine;
         state.machineIndex = Number(button.dataset.machine);
@@ -250,9 +337,9 @@
         setView("overview");
       }));
     } else if (view === "maintenance") {
-      alternate.innerHTML = `<p class="alternate-intro">Maintenance indicators are illustrative and derived from this synthetic session.</p><div class="alternate-grid">${machines.map((machine, index) => `<article class="alternate-card"><div class="machine-status ${hasFault(index) ? "fault" : ""}"><i></i>${hasFault(index) ? "Inspect recommended" : "No action needed"}</div><h3>${machine.name}</h3><p>Vibration trend: ${hasFault(index) && state.scenario === "bearing" ? "Elevated" : "Stable"}<br>Temperature trend: ${hasFault(index) && state.scenario === "overheat" ? "Elevated" : "Stable"}<br>Next review: ${hasFault(index) ? "Recommended now" : "In 30 days"}</p></article>`).join("")}</div>`;
+      alternate.innerHTML = `<p class="alternate-intro">Maintenance indicators are illustrative and derived from this synthetic session.</p><div class="alternate-grid">${machines.map((machine, index) => `<article class="alternate-card"><div class="machine-status ${hasFault(index) ? "fault" : ""}"><i></i>${hasFault(index) ? "Inspect recommended" : "No action needed"}</div><h3>${escapeText(machine.name)}</h3><p>Vibration trend: ${machineValue(machine, "vibration") > machine.vibration + 0.5 ? "Elevated" : "Stable"}<br>Temperature trend: ${machineValue(machine, "temperature") > machine.temperature + 2 ? "Elevated" : "Stable"}<br>Next review: ${hasFault(index) ? "Recommended now" : "In 30 days"}</p></article>`).join("")}</div>`;
     } else {
-      const rows = machines.flatMap((machine) => ["temperature", "pressure", "vibration"].map((metric) => `<tr><td>${new Date(history.at(-1).timestamp).toLocaleTimeString()}</td><td>${machine.name}</td><td>${metricConfig[metric].label}</td><td>${machineValue(machine, metric).toFixed(2)} ${metricConfig[metric].unit}</td><td>${hasFault(machines.indexOf(machine)) ? scenarios[state.scenario].label : "Normal"}</td></tr>`));
+      const rows = machines.flatMap((machine) => ["temperature", "pressure", "vibration"].map((metric) => `<tr><td>${new Date(history.at(-1).timestamp).toLocaleTimeString()}</td><td>${escapeText(machine.name)}</td><td>${metricConfig[metric].label}</td><td>${machineValue(machine, metric).toFixed(2)} ${metricConfig[metric].unit}</td><td>${hasFault(machines.indexOf(machine)) ? scenarios[state.scenario].label : "Normal"}</td></tr>`));
       alternate.innerHTML = `<p class="alternate-intro">Latest live synthetic sensor samples. Export data to save the current fleet snapshot as CSV.</p><div class="panel"><table class="data-table"><thead><tr><th>Timestamp</th><th>Machine</th><th>Metric</th><th>Reading</th><th>Scenario</th></tr></thead><tbody>${rows.join("")}</tbody></table></div>`;
     }
   }
@@ -281,6 +368,13 @@
     showToast("Synthetic fleet data exported as CSV.");
   }
 
+  setBusy(true);
+  await initializeSource();
+  $("#source-mode").addEventListener("change", (event) => {
+    parameters.set("mode", event.target.value);
+    location.search = parameters.toString();
+  });
+
   $$("nav button").forEach((button) => button.addEventListener("click", () => setView(button.dataset.view)));
   $("#chart-machine").addEventListener("change", (event) => {
     state.machineIndex = Number(event.target.value);
@@ -298,9 +392,18 @@
   $("#dialog").addEventListener("click", (event) => {
     if (event.target === $("#dialog")) $("#dialog").close();
   });
-  $("#simulation-form").addEventListener("submit", (event) => {
+  $("#simulation-form").addEventListener("submit", async (event) => {
     event.preventDefault();
+    if (busy) return;
     const machineIndex = Number($("#target").value);
+    const scenario = $("#scenario").value;
+    let firstSamples;
+    if (apiMode) {
+      setBusy(true);
+      try { firstSamples = await fetchFleet(0, 1, machineIndex, scenario); }
+      catch { connectionFailed(); return; }
+      finally { setBusy(false); }
+    }
     state.machineIndex = machineIndex;
     state.targetIndex = machineIndex;
     state.speed = Number($("#speed").value);
@@ -311,7 +414,8 @@
     state.lastTick = Date.now();
     state.points = 0;
     history.length = 0;
-    collectSample();
+    if (apiMode) appendFleet(firstSamples);
+    else collectSample();
     updateElapsed();
     $("#chart-machine").value = String(machineIndex);
     $(".status-strip .muted b").textContent = `SIM-${new Date().getFullYear()}-${String(state.session).padStart(4, "0")}`;
@@ -339,7 +443,23 @@
   });
 
   const restored = restoreSession();
-  if (!restored) collectSample();
+  if (!restored) {
+    if (apiMode) {
+      try { appendFleet(await fetchFleet(0, 1)); }
+      catch {
+        // Keep the selected API source; no browser readings are substituted.
+        $("#source-description").textContent = "API unavailable · choose Browser demo or reload to retry";
+        $("#run-status").textContent = "Unable to load API telemetry";
+        $("#stream-status").textContent = "OFFLINE";
+        $("#save-status").textContent = "No API readings received";
+        $$("nav button").forEach((button) => { button.disabled = true; });
+        $("#overview").hidden = true;
+        $("#alternate").hidden = false;
+        $("#alternate").innerHTML = '<article class="alternate-card"><h3>API telemetry unavailable</h3><p>Reload to retry, or choose Browser demo from Data source to continue locally.</p></article>';
+        return;
+      }
+    } else collectSample();
+  }
   addEvent(restored ? "Session restored from this device" : "Simulation engine started generating synthetic telemetry");
   $(".status-strip .muted b").textContent = `SIM-${new Date().getFullYear()}-${String(state.session).padStart(4, "0")}`;
   $("#chart-machine").value = String(state.machineIndex);
@@ -350,8 +470,10 @@
   renderEvents();
   updateElapsed();
   setView(state.activeView);
+  setBusy(false);
 
-  function advanceSimulation() {
+  async function advanceSimulation() {
+    if (busy) return;
     const now = Date.now();
     if (state.paused) {
       state.lastTick = now;
@@ -362,11 +484,18 @@
     state.lastTick += steps * 1000;
     const totalSteps = steps * state.speed;
     const skippedSteps = Math.max(0, totalSteps - 60);
-    state.elapsed += skippedSteps;
-    state.points += skippedSteps * machines.length * Object.keys(metricConfig).length;
-    for (let step = 0; step < Math.min(totalSteps, 60); step += 1) {
-      state.elapsed += 1;
-      collectSample();
+    if (apiMode) {
+      setBusy(true);
+      try { appendFleet(await fetchFleet(state.elapsed + skippedSteps + 1, Math.min(totalSteps, 60))); }
+      catch { connectionFailed(); return; }
+      finally { setBusy(false); }
+    } else {
+      state.elapsed += skippedSteps;
+      state.points += skippedSteps * machines.length * Object.keys(metricConfig).length;
+      for (let step = 0; step < Math.min(totalSteps, 60); step += 1) {
+        state.elapsed += 1;
+        collectSample();
+      }
     }
     updateElapsed();
     renderMachines();
@@ -376,7 +505,7 @@
   }
 
   $("#pause-sim").addEventListener("click", () => {
-    advanceSimulation();
+    if (busy) return;
     state.paused = !state.paused;
     addEvent(state.paused ? "Simulation paused" : "Simulation resumed");
     state.lastTick = Date.now();

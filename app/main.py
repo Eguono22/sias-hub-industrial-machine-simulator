@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from pathlib import Path
+from datetime import datetime, timedelta, timezone
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -13,10 +14,11 @@ from app.simulator import (
     get_fault_scenarios,
     get_machine,
     get_machine_snapshot,
+    get_telemetry_sample,
 )
 
 BASE_DIR = Path(__file__).resolve().parent
-STATIC_DIR = BASE_DIR / "static"
+STATIC_DIR = BASE_DIR.parent / "simulator" / "dist"
 
 app = FastAPI(
     title="SIAS Hub Industrial Machine Simulator",
@@ -29,7 +31,7 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -71,7 +73,7 @@ def list_machines():
 def get_machine_details(machine_id: str):
     machine = get_machine(machine_id)
     if machine is None:
-        return {"error": f"Machine '{machine_id}' was not found."}
+        raise HTTPException(status_code=404, detail=f"Machine '{machine_id}' was not found.")
     return machine
 
 
@@ -79,7 +81,7 @@ def get_machine_details(machine_id: str):
 def get_snapshot(machine_id: str):
     machine = get_machine(machine_id)
     if machine is None:
-        return {"error": f"Machine '{machine_id}' was not found."}
+        raise HTTPException(status_code=404, detail=f"Machine '{machine_id}' was not found.")
     return get_machine_snapshot(machine_id)
 
 
@@ -87,7 +89,7 @@ def get_snapshot(machine_id: str):
 def machine_fault_scenarios(machine_id: str):
     machine = get_machine(machine_id)
     if machine is None:
-        return {"error": f"Machine '{machine_id}' was not found."}
+        raise HTTPException(status_code=404, detail=f"Machine '{machine_id}' was not found.")
     return {
         "machine_id": machine_id,
         "machine_type": machine["type"],
@@ -98,14 +100,18 @@ def machine_fault_scenarios(machine_id: str):
 @app.get("/machines/{machine_id}/telemetry")
 def machine_telemetry(
     machine_id: str,
-    duration_minutes: int = 10,
+    duration_minutes: float = Query(default=10, gt=0, le=60),
     scenario: str = "normal",
-    sample_rate_hz: float = 1.0,
+    sample_rate_hz: float = Query(default=1, gt=0, le=10),
 ):
     machine = get_machine(machine_id)
     if machine is None:
-        return {"error": f"Machine '{machine_id}' was not found."}
+        raise HTTPException(status_code=404, detail=f"Machine '{machine_id}' was not found.")
 
+    if scenario not in get_fault_scenarios():
+        raise HTTPException(status_code=422, detail="Unknown fault scenario")
+    if duration_minutes * 60 * sample_rate_hz > 10000:
+        raise HTTPException(status_code=422, detail="Maximum 10000 telemetry samples per request")
     telemetry = generate_telemetry(
         machine_id=machine_id,
         machine_type=machine["type"],
@@ -125,6 +131,39 @@ def machine_telemetry(
 @app.get("/fault-scenarios")
 def list_fault_scenarios():
     return {"fault_scenarios": get_fault_scenarios()}
+
+
+@app.get("/fleet/telemetry")
+def fleet_telemetry(
+    target: str = "extruder-01",
+    scenario: str = "normal",
+    start: int = Query(default=0, ge=0, le=1000000000),
+    count: int = Query(default=1, ge=1, le=60),
+):
+    if get_machine(target) is None:
+        raise HTTPException(status_code=404, detail="Unknown target machine")
+    if scenario not in get_fault_scenarios():
+        raise HTTPException(status_code=422, detail="Unknown fault scenario")
+    now = datetime.now(timezone.utc)
+    samples = []
+    for offset in range(count):
+        elapsed = start + offset
+        timestamp = now - timedelta(seconds=count - offset - 1)
+        readings = [get_telemetry_sample(machine["id"], elapsed,
+                    scenario if machine["id"] == target else "normal", timestamp)
+                    for machine in build_machine_catalog()]
+        samples.append({"elapsed": elapsed, "timestamp": timestamp.isoformat(), "readings": readings})
+    return {"samples": samples}
+
+
+@app.get("/app.js", include_in_schema=False)
+def dashboard_script():
+    return FileResponse(STATIC_DIR / "app.js", media_type="text/javascript")
+
+
+@app.get("/style.css", include_in_schema=False)
+def dashboard_styles():
+    return FileResponse(STATIC_DIR / "style.css", media_type="text/css")
 
 
 if __name__ == "__main__":
