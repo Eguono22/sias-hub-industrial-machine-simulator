@@ -1,0 +1,7 @@
+services:
+  - type: web
+    name: sias-hub-industrial-machine-simulator
+    runtime: docker
+    plan: free
+    branch: main
+    healthCheckPath: /health

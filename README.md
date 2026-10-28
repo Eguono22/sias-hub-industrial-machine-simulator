@@ -26,6 +26,10 @@ This project uses FastAPI to provide a lightweight simulator for industrial auto
 
 ## Quick start
 
+On macOS, double-click `start-local.command` (or run `./start-local.command` in Terminal). It creates a local Python environment, installs dependencies, and starts the dashboard at http://localhost:8001. Keep the Terminal window open while using the app; press Ctrl+C to stop it. The first launch requires internet access to install dependencies. To select another port, run `PORT=8080 ./start-local.command`.
+
+For manual setup:
+
 1. Create and activate a virtual environment
 
 ```bash
@@ -53,6 +57,31 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 The dashboard automatically connects to the same server for its machine catalog, fault scenarios, and synthetic telemetry. Use **Data source** to switch to browser demo mode. API mode supports all eight backend scenarios; demo mode retains its five local scenarios. Sessions are saved separately for each data source. If an API session loses its connection, it pauses and records a warning; choose Resume to retry.
 
 To use a separately hosted API, open the dashboard with `?api=http://localhost:8000` (or the backend's HTTPS URL). A hosted HTTPS dashboard requires an HTTPS backend. `?mode=demo` skips the API connection. If the API catalog cannot be reached at startup, the dashboard labels and uses browser demo mode.
+
+## Run with Docker
+
+With Docker running, build and start the complete app from the repository root:
+
+```bash
+docker build -t sias-simulator .
+docker run --rm -p 127.0.0.1:8000:8000 sias-simulator
+```
+
+Open http://localhost:8000. The image includes both the FastAPI backend and dashboard, including the machine artwork. Hosting providers can set `PORT` to choose the listening port.
+
+## Publish online
+
+The included `render.yaml` deploys the complete app as one Render web service, using the Dockerfile and `/health` readiness check.
+
+1. Push this repository to GitHub.
+2. Sign in to [Render](https://dashboard.render.com/) and choose **New → Blueprint**.
+3. Connect `Eguono22/sias-hub-industrial-machine-simulator` and select the `main` branch.
+4. Review the service configuration and create the Blueprint.
+5. When deployment succeeds, open the service's HTTPS URL. The dashboard and API use the same URL; API documentation is available at `/docs`.
+
+The Blueprint selects the free service plan. Review current [free-service limits](https://render.com/docs/free), including idle spin-down, before choosing it for ongoing use. See Render's [Blueprint documentation](https://render.com/docs/infrastructure-as-code) for account setup and deployment details.
+
+Sessions are stored in each browser's local storage. The local app and hosted app have separate saved sessions; this app does not synchronize sessions between devices.
 
 ## Tests
 
